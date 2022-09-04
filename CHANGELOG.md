@@ -20,6 +20,12 @@
   [Marcelo Fabri](https://github.com/marcelofabri)
   [#2915](https://github.com/realm/SwiftLint/issues/2915)
 
+* Rewrite `for_where` rule with SwiftSyntax, adding a new configuration
+  `allow_for_as_filter` to allow using `for in` with a single `if` inside
+  when there's a `return` statement inside the `if`'s body.  
+  [Marcelo Fabri](https://github.com/marcelofabri)
+  [#4040](https://github.com/realm/SwiftLint/issues/4040)
+
 #### Bug Fixes
 
 * None.
