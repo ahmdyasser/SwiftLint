@@ -1,7 +1,6 @@
-import Foundation
-import SourceKittenFramework
+import SwiftSyntax
 
-public struct ExplicitInitRule: SubstitutionCorrectableASTRule, ConfigurationProviderRule, OptInRule {
+public struct ExplicitInitRule: SwiftSyntaxCorrectableRule, ConfigurationProviderRule, OptInRule {
     public var configuration = SeverityConfiguration(.warning)
 
     public init() {}
@@ -164,52 +163,78 @@ public struct ExplicitInitRule: SubstitutionCorrectableASTRule, ConfigurationPro
         ]
     )
 
-    public func validate(file: SwiftLintFile, kind: SwiftExpressionKind,
-                         dictionary: SourceKittenDictionary) -> [StyleViolation] {
-        return violationRanges(in: file, kind: kind, dictionary: dictionary).map {
-            StyleViolation(ruleDescription: Self.description,
-                           severity: configuration.severity,
-                           location: Location(file: file, characterOffset: $0.location))
+    public func makeVisitor(file: SwiftLintFile) -> ViolationsSyntaxVisitor? {
+        Visitor()
+    }
+
+    public func makeRewriter(file: SwiftLintFile) -> ViolationsSyntaxRewriter? {
+        file.locationConverter.map { locationConverter in
+            Rewriter(
+                locationConverter: locationConverter,
+                disabledRegions: disabledRegions(file: file)
+            )
+        }
+    }
+}
+
+private extension ExplicitInitRule {
+    final class Visitor: SyntaxVisitor, ViolationsSyntaxVisitor {
+        private(set) var violationPositions: [AbsolutePosition] = []
+
+        override func visitPost(_ node: FunctionCallExprSyntax) {
+            guard
+                let calledExpression = node.calledExpression.as(MemberAccessExprSyntax.self),
+                let calledBase = calledExpression.base?.as(IdentifierExprSyntax.self),
+                calledBase.identifier.text.first?.isUppercase == true,
+                calledExpression.name.text == "init",
+                let violationPosition = calledExpression.base?.endPositionBeforeTrailingTrivia
+            else {
+                return
+            }
+
+            violationPositions.append(violationPosition)
         }
     }
 
-    private let initializerWithType = regex(#"^([A-Z][^(\s]*)\s*\.init$"#)
+    final class Rewriter: SyntaxRewriter, ViolationsSyntaxRewriter {
+        private(set) var correctionPositions: [AbsolutePosition] = []
+        let locationConverter: SourceLocationConverter
+        let disabledRegions: [SourceRange]
 
-    public func violationRanges(in file: SwiftLintFile, kind: SwiftExpressionKind,
-                                dictionary: SourceKittenDictionary) -> [NSRange] {
-        guard kind == .call,
-              let name = dictionary.name,
-              let typeRange = findTypeRange(in: name),
-              let nameByteRange = dictionary.nameByteRange else {
-            return []
+        init(locationConverter: SourceLocationConverter, disabledRegions: [SourceRange]) {
+            self.locationConverter = locationConverter
+            self.disabledRegions = disabledRegions
         }
-        let content = file.stringView
-        guard let nameRange = content.byteRangeToNSRange(nameByteRange),
-              let typeByteRange = content.NSRangeToByteRange(start: nameRange.location, length: typeRange.length) else {
-            return []
-        }
-        let violationByteRange = ByteRange(
-            location: nameByteRange.location + typeByteRange.length,
-            length: nameByteRange.length - typeByteRange.length
-        )
-        guard let violationRange = content.byteRangeToNSRange(violationByteRange) else {
-            return []
-        }
-        return [violationRange]
-    }
 
-    private func findTypeRange(in name: String) -> NSRange? {
-        if ["super.init", "self.init"].contains(name) {
-            return nil
-        }
-        let range = NSRange(location: 0, length: name.utf16.count)
-        if let match = initializerWithType.firstMatch(in: name, options: [], range: range) {
-            return match.range(at: 1)
-        }
-        return nil
-    }
+        override func visit(_ node: FunctionCallExprSyntax) -> ExprSyntax {
+            guard
+                let calledExpression = node.calledExpression.as(MemberAccessExprSyntax.self),
+                let calledBase = calledExpression.base?.as(IdentifierExprSyntax.self),
+                calledBase.identifier.text.first?.isUppercase == true,
+                calledExpression.name.text == "init",
+                let violationPosition = calledExpression.base?.endPositionBeforeTrailingTrivia,
+                !isInDisabledRegion(node)
+            else {
+                return super.visit(node)
+            }
 
-    public func substitution(for violationRange: NSRange, in file: SwiftLintFile) -> (NSRange, String)? {
-        return (violationRange, "")
+            correctionPositions.append(violationPosition)
+
+            let newNode = node.withCalledExpression(
+                ExprSyntax(
+                    IdentifierExprSyntax {
+                        $0.useIdentifier(calledBase.identifier)
+                    }
+                )
+            )
+
+            return super.visit(newNode)
+        }
+
+        private func isInDisabledRegion<T: SyntaxProtocol>(_ node: T) -> Bool {
+            disabledRegions.contains { region in
+                region.contains(node.positionAfterSkippingLeadingTrivia, locationConverter: locationConverter)
+            }
+        }
     }
 }
