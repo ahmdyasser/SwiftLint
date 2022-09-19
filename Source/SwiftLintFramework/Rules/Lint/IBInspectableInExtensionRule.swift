@@ -1,6 +1,6 @@
-import SourceKittenFramework
+import SwiftSyntax
 
-public struct IBInspectableInExtensionRule: ConfigurationProviderRule, OptInRule {
+public struct IBInspectableInExtensionRule: SwiftSyntaxRule, ConfigurationProviderRule, OptInRule {
     public var configuration = SeverityConfiguration(.warning)
 
     public init() {}
@@ -20,33 +20,39 @@ public struct IBInspectableInExtensionRule: ConfigurationProviderRule, OptInRule
         triggeringExamples: [
             Example("""
             extension Foo {
-              @IBInspectable private var x: Int
+              ↓@IBInspectable private var x: Int
             }
             """)
         ]
     )
 
-    public func validate(file: SwiftLintFile) -> [StyleViolation] {
-        let collector = NamespaceCollector(dictionary: file.structureDictionary)
-        let elements = collector.findAllElements(of: [.extension])
+    public func makeVisitor(file: SwiftLintFile) -> ViolationsSyntaxVisitor? {
+        Visitor()
+    }
+}
 
-        return elements
-            .flatMap { element in
-                return element.dictionary.substructure.compactMap { element -> ByteCount? in
-                    guard element.declarationKind == .varInstance,
-                        element.enclosedSwiftAttributes.contains(.ibinspectable),
-                        let offset = element.offset
-                    else {
-                        return nil
-                    }
+private extension IBInspectableInExtensionRule {
+    final class Visitor: SyntaxVisitor, ViolationsSyntaxVisitor {
+        private(set) var violationPositions: [AbsolutePosition] = []
 
-                    return offset
-                }
+        override func visitPost(_ node: AttributeSyntax) {
+            if node.attributeName.text == "IBInspectable" && node.inExtension {
+                violationPositions.append(node.positionAfterSkippingLeadingTrivia)
             }
-            .map {
-                StyleViolation(ruleDescription: Self.description,
-                               severity: configuration.severity,
-                               location: Location(file: file, byteOffset: $0))
+        }
+    }
+}
+
+private extension SyntaxProtocol {
+    var inExtension: Bool {
+        var nextParent = parent
+        while let parent = nextParent {
+            if parent.is(ExtensionDeclSyntax.self) {
+                return true
+            } else {
+                nextParent = parent.parent
             }
+        }
+        return false
     }
 }
