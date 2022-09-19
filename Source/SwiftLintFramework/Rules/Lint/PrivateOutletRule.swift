@@ -1,6 +1,6 @@
-import SourceKittenFramework
+import SwiftSyntax
 
-public struct PrivateOutletRule: ASTRule, OptInRule, ConfigurationProviderRule {
+public struct PrivateOutletRule: SwiftSyntaxRule, OptInRule, ConfigurationProviderRule {
     public var configuration = PrivateOutletRuleConfiguration(allowPrivateSet: false)
 
     public init() {}
@@ -23,40 +23,58 @@ public struct PrivateOutletRule: ASTRule, OptInRule, ConfigurationProviderRule {
         ]
     )
 
-    public func validate(file: SwiftLintFile, kind: SwiftDeclarationKind,
-                         dictionary: SourceKittenDictionary) -> [StyleViolation] {
-        guard kind == .varInstance else {
-            return []
-        }
-
-        // Check if IBOutlet
-        let isOutlet = dictionary.enclosedSwiftAttributes.contains(.iboutlet)
-        guard isOutlet else { return [] }
-
-        // Check if private
-        let isPrivate = dictionary.accessibility?.isPrivate ?? false
-        let isPrivateSet = isPrivateLevel(identifier: dictionary.setterAccessibility)
-
-        if isPrivate || (configuration.allowPrivateSet && isPrivateSet) {
-            return []
-        }
-
-        // Violation found!
-        let location: Location
-        if let offset = dictionary.offset {
-            location = Location(file: file, byteOffset: offset)
-        } else {
-            location = Location(file: file.path)
-        }
-
-        return [
-            StyleViolation(ruleDescription: Self.description,
-                           severity: configuration.severityConfiguration.severity,
-                           location: location)
-        ]
+    public func makeVisitor(file: SwiftLintFile) -> ViolationsSyntaxVisitor? {
+        Visitor(allowPrivateSet: configuration.allowPrivateSet)
     }
 
-    private func isPrivateLevel(identifier: String?) -> Bool {
-        return identifier.flatMap(AccessControlLevel.init(identifier:))?.isPrivate ?? false
+    public func makeViolation(file: SwiftLintFile, position: AbsolutePosition) -> StyleViolation {
+        StyleViolation(
+            ruleDescription: Self.description,
+            severity: configuration.severityConfiguration.severity,
+            location: Location(file: file, position: position)
+        )
+    }
+}
+
+private extension PrivateOutletRule {
+    final class Visitor: SyntaxVisitor, ViolationsSyntaxVisitor {
+        private(set) var violationPositions: [AbsolutePosition] = []
+        private let allowPrivateSet: Bool
+
+        init(allowPrivateSet: Bool) {
+            self.allowPrivateSet = allowPrivateSet
+        }
+
+        override func visitPost(_ node: MemberDeclListItemSyntax) {
+            guard
+                let decl = node.decl.as(VariableDeclSyntax.self),
+                decl.attributes?.hasIBOutlet == true,
+                decl.modifiers?.isPrivateOrFilePrivate != true
+            else {
+                return
+            }
+
+            if allowPrivateSet && decl.modifiers?.isPrivateSet == true {
+                return
+            }
+
+            violationPositions.append(decl.letOrVarKeyword.positionAfterSkippingLeadingTrivia)
+        }
+    }
+}
+
+private extension AttributeListSyntax {
+    var hasIBOutlet: Bool {
+        contains { $0.as(AttributeSyntax.self)?.attributeName.text == "IBOutlet" }
+    }
+}
+
+private extension ModifierListSyntax {
+    var isPrivateOrFilePrivate: Bool {
+        contains { ["private", "fileprivate"].contains($0.name.text) }
+    }
+
+    var isPrivateSet: Bool {
+        contains { $0.withoutTrivia().description == "private(set)" }
     }
 }
